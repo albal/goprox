@@ -8,6 +8,10 @@
 *.so
 *.dylib
 
+# Cross-compiled binaries
+goprox
+goprox-*
+
 # Test binary, built with `go test -c`
 *.test
 

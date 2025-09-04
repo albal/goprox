@@ -1,0 +1,170 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      validate_only:
+        description: 'Only validate code, do not build packages'
+        required: false
+        default: 'true'
+
+jobs:
+  validate:
+    name: Validate Code
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+    
+    - name: Initialize Go module if not exists
+      run: |
+        if [ ! -f go.mod ]; then
+          go mod init goprox
+        fi
+    
+    - name: Download dependencies
+      run: go mod tidy
+    
+    - name: Verify code formatting
+      run: |
+        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+          echo "Code is not formatted properly:"
+          gofmt -s -l .
+          exit 1
+        fi
+    
+    - name: Run go vet
+      run: go vet ./...
+    
+    - name: Test build
+      run: go build -v ./...
+
+  build-and-release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    needs: validate
+    # Only run build job on push to main, not on workflow_dispatch or PRs
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    strategy:
+      matrix:
+        include:
+          # Mac builds
+          - goos: darwin
+            goarch: amd64
+            name: goprox-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            name: goprox-darwin-arm64
+          # Linux builds  
+          - goos: linux
+            goarch: amd64
+            name: goprox-linux-amd64
+          - goos: linux
+            goarch: "386"
+            name: goprox-linux-386
+          # Windows builds
+          - goos: windows
+            goarch: amd64
+            name: goprox-windows-amd64.exe
+          - goos: windows
+            goarch: "386"
+            name: goprox-windows-386.exe
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+    
+    - name: Initialize Go module if not exists
+      run: |
+        if [ ! -f go.mod ]; then
+          go mod init goprox
+        fi
+    
+    - name: Download dependencies
+      run: go mod tidy
+    
+    - name: Build binary
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+        CGO_ENABLED: 0
+      run: |
+        go build -v -ldflags "-s -w" -o ${{ matrix.name }} main.go
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ matrix.name }}
+        path: ${{ matrix.name }}
+
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: build-and-release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: ./artifacts
+    
+    - name: Create release tag
+      id: create_tag
+      run: |
+        TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
+        TAG="v${TIMESTAMP}-${GITHUB_SHA:0:7}"
+        echo "tag=${TAG}" >> $GITHUB_OUTPUT
+        git config user.name github-actions
+        git config user.email github-actions@github.com
+        git tag ${TAG}
+        git push origin ${TAG}
+    
+    - name: Prepare release assets
+      run: |
+        mkdir -p release-assets
+        # Each artifact is in its own subdirectory, copy all files to release-assets
+        find ./artifacts -type f \( -name "goprox-*" -o -name "*.exe" \) | while read file; do
+          cp "$file" "release-assets/"
+        done
+        ls -la release-assets/
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.create_tag.outputs.tag }}
+        name: Release ${{ steps.create_tag.outputs.tag }}
+        body: |
+          Automated release of goprox
+          
+          Built from commit: ${{ github.sha }}
+          
+          ## Supported Platforms:
+          - **macOS**: goprox-darwin-amd64 (Intel), goprox-darwin-arm64 (Apple Silicon)
+          - **Linux**: goprox-linux-amd64 (64-bit), goprox-linux-386 (32-bit)  
+          - **Windows**: goprox-windows-amd64.exe (64-bit), goprox-windows-386.exe (32-bit)
+          
+          ## Usage:
+          1. Download the appropriate binary for your platform
+          2. Make it executable (on Unix systems): `chmod +x goprox-*`
+          3. Run: `./goprox-*` (or `goprox-*.exe` on Windows)
+          4. The proxy server will start on port 8888
+        files: release-assets/*
+        draft: false
+        prerelease: false
+        token: ${{ secrets.GITHUB_TOKEN }}
