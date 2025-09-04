@@ -111,6 +111,8 @@ jobs:
         path: ${{ matrix.name }}
 
   create-release:
+    permissions:
+      contents: write 
     name: Create Release
     runs-on: ubuntu-latest
     needs: build-and-release
